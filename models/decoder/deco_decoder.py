@@ -97,8 +97,8 @@ class DECODecoderLayer(nn.Module):
         self.sim = SelfInteractionModule(d_model, kernel_size)
         self.cim = CrossInteractionModule(d_model, kernel_size)
         
-        # Optional FFN or some residual after SIM + CIM
-        self.mlp = nn.Sequential(
+        # Optional FFN after SIM + CIM
+        self.FFN = nn.Sequential(
             nn.Conv2d(d_model, d_model, 1),
             nn.ReLU(inplace=True),
             nn.Conv2d(d_model, d_model, 1),
@@ -116,17 +116,13 @@ class DECODecoderLayer(nn.Module):
         # 2) Cross-Interaction
         #    -> upsample queries to (H, W), fuse with encoder_feats
         out_cim = self.cim(out_sim, encoder_feats)  # (B, d_model, H, W)
+
+        # 3) Small feed-forward + residual and downsample back to (Qh, Qw)
         
-        # 3) (Optional) We might downsample back to (Qh, Qw) if next layer
-        #    expects queries in the same shape as before. 
-        #    Or we let them remain at (H, W). But the paper’s figure 
-        #    typically shows re-pooling to the original query size:
         Qh, Qw = query_2d.shape[-2], query_2d.shape[-1]
-        x = F.adaptive_max_pool2d(out_cim, (Qh, Qw))  # (B, d_model, Qh, Qw)
+        of = F.adaptive_max_pool2d(out_cim + self.FFN(out_cim), (Qh, Qw))  # (B, d_model, Qh, Qw)       
         
-        # 4) Small feed-forward
-        x_ffn = self.mlp(x) + x  # residual style
-        return x_ffn
+        return of
 
 
 class SelfInteractionModule(nn.Module):
@@ -144,7 +140,7 @@ class SelfInteractionModule(nn.Module):
             groups=d_model
         )
         self.pointwise = nn.Conv2d(d_model, d_model, kernel_size=1)
-        self.act = nn.ReLU(inplace=True)  # or GELU, depending on the paper
+        self.act = nn.ReLU(inplace=True)  # or GELU ? Didn't specify in paper
 
     def forward(self, x):
         """
@@ -154,7 +150,7 @@ class SelfInteractionModule(nn.Module):
         out = self.pointwise(out)
         out = self.act(out)
         
-        # add a residual if the paper suggests it ? Will reread later
+        # add a residual 
         out = out + x
         return out
 
