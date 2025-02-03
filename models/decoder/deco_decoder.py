@@ -192,7 +192,21 @@ class CrossInteractionModule(nn.Module):
         out = self.depthwise(fused)
         out = self.pointwise(out)
         out = self.act(out)
-        
+
+        # 3) Skip connection
+        out = upsampled + out
+
+
+        # If we followed the paper, it should look like this:
+
+        # 2) fuse 
+        # fused = upsampled + encoder_feats  # or concat + conv
+
+        # 3) Depthwise conv + skip connection
+        # out = upsampled + self.depthwise(fused)
+
+        # But it feels sketchy to me. Not enough details in the paper.
+        # So I'm doing what's above for now.
         return out
 
 
