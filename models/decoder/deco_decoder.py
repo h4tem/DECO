@@ -8,29 +8,22 @@ class DECODecoder(nn.Module):
       - Holds learnable object queries o ∈ ℝᴺˣᵈ
       - Processes through stacked SIM and CIM modules
       - Outputs class logits and box coordinates via FFNs
-    
-    Paper specifies:
-    - Query dimension d_model
-    - Number of queries N (e.g., N=100)
-    - Number of layers (6 optimal from Table 4)
-    - Kernel size 9x9 (Table 5)
-    - Using FFNs for final predictions
     """
     def __init__(
         self,
         d_model=256, 
-        num_queries=100, 
-        num_layers=3,
+        num_queries=100,  # Ablation study shows 100 is best
+        num_layers=3,     # Table 4 shows 6 is a good choice, but we use 3
         num_classes=80,   # e.g. for COCO
-        kernel_size=9,
+        kernel_size=5,    # Table 5 shows 9x9 is best, we use 5 for now
     ):
         """
         Args:
-            d_model: Channel dimension for queries/features (specified in paper)
-            num_queries: Total number of object queries (N=100 in paper)
-            num_layers: Number of SIM+CIM layers (Table 4 shows 6 is a good choice, but we use 3)
+            d_model: Channel dimension for queries/features 
+            num_queries: Total number of object queries 
+            num_layers: Number of SIM+CIM layers 
             num_classes: Number of object categories (dataset-dependent)
-            kernel_size: For depthwise conv (9x9 from Table 5)
+            kernel_size: For depthwise conv 
         """
         super().__init__()
         
@@ -158,17 +151,21 @@ class DECODecoderLayer(nn.Module):
 class SelfInteractionModule(nn.Module):
     """
     Following Section 3.1 and Figure 2:
-    SIM replaces self-attention with depthwise + pointwise convolutions.
-    
-    Note: Paper specifies:
-    - Large kernel depthwise conv (9x9 from ablation Table 5)
-    - Followed by 1x1 (pointwise) conv
+    SIM replaces self-attention with:
+    - Large kernel depthwise conv
+    - Two pointwise (1x1) convs
     - Skip connection
-    But doesn't specify:
-    - Choice of activation function between convs
+    
+    Paper specifies in Figure 2:
+    - DWConv → PWConv → PWConv → Skip connection
+    - Large kernel depthwise conv (9x9 from Table 5)
+    
+    Note: Paper doesn't specify:
+    - Whether to use activation between convs
     """
     def __init__(self, d_model=256, kernel_size=9):
         super().__init__()
+        # DWConv first
         self.depthwise = nn.Conv2d(
             d_model, 
             d_model, 
@@ -176,16 +173,18 @@ class SelfInteractionModule(nn.Module):
             padding=kernel_size // 2, 
             groups=d_model
         )
-        self.pointwise = nn.Conv2d(d_model, d_model, kernel_size=1)
+        # Two PWConvs
+        self.pointwise1 = nn.Conv2d(d_model, d_model, kernel_size=1)
+        self.pointwise2 = nn.Conv2d(d_model, d_model, kernel_size=1)
         
-        # Note: Paper doesn't specify activation choice
-        # Using ReLU as a standard choice, but could be GELU
+        # Note: Paper doesn't specify activation
+        # Using ReLU as a standard choice
         self.act = nn.ReLU(inplace=True)
 
     def forward(self, x):
         """
         Following Figure 2's SIM structure:
-        x → DWConv → PWConv → Act → Skip connection
+        x → DWConv → PWConv → PWConv → Skip connection
         
         Args:
             x: shape (B, d_model, Qh, Qw)
@@ -193,8 +192,9 @@ class SelfInteractionModule(nn.Module):
             out: shape (B, d_model, Qh, Qw)
         """
         out = self.depthwise(x)
-        out = self.pointwise(out)
-        out = self.act(out)
+        out = self.pointwise1(out)
+        out = self.act(out)  # Note: Activation placement not specified in paper
+        out = self.pointwise2(out)
         
         # Paper shows skip connection in Figure 2
         out = out + x
@@ -207,17 +207,17 @@ class CrossInteractionModule(nn.Module):
     CIM replaces cross-attention through three steps:
     1. Upsample queries to match encoder feature size
     2. Fuse upsampled queries with encoder features (element-wise add)
-    3. Apply depthwise conv with skip connection
+    3. Apply depthwise conv with skip connection from upsampled queries
     
-    Paper specifies in Eq(1,2):
-    - Upsampling queries to match encoder size
-    - Element-wise add for fusion (best in Table 3)
-    - Skip connection: ôf = ô + dwconv(Fusion(ô, zₑ))
+    Paper specifies in Eq(2):
+    ôf = ô + dwconv(Fusion(ô, zₑ))
+    where:
+    - ô is upsampled queries
+    - zₑ is encoder features
+    - Fusion is element-wise addition (best in Table 3)
     
-    Note: Paper doesn't specify:
-    - Upsampling mode (we use bilinear)
-    - Whether to use pointwise conv after depthwise
-    - Choice of activation function
+    Note: Unlike SIM, CIM's Figure 2 and Eq(2) only show depthwise conv,
+    no pointwise conv or activation specified.
     """
     def __init__(self, d_model=256, kernel_size=9):
         super().__init__()
@@ -229,9 +229,6 @@ class CrossInteractionModule(nn.Module):
             padding=kernel_size // 2, 
             groups=d_model
         )
-        # Note: These are not specified in paper but included for consistency
-        self.pointwise = nn.Conv2d(d_model, d_model, kernel_size=1)
-        self.act = nn.ReLU(inplace=True)
 
     def forward(self, query_2d, encoder_feats):
         """
@@ -253,14 +250,8 @@ class CrossInteractionModule(nn.Module):
         # 2) Fusion(ô, zₑ) = element-wise add (best in Table 3)
         fused = upsampled + encoder_feats
         
-        # Note: Paper's Eq(2) only shows depthwise conv
-        # We add pointwise + activation for consistency with SIM
-        out = self.depthwise(fused)
-        out = self.pointwise(out)
-        out = self.act(out)
-
-        # 3) Skip connection from Eq(2)
-        out = upsampled + out
+        # 3) Following Eq(2): ôf = ô + dwconv(Fusion(ô, zₑ))
+        out = upsampled + self.depthwise(fused)
         
         return out
 
