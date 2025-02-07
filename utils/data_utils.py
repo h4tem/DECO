@@ -103,10 +103,9 @@ def collate_fn(batch):
 
 class DetectionTransforms:
     """
-    Transforms for DETR/DECO training:
-    - Random resize + crop
-    - Random horizontal flip
-    - Convert to tensors and normalize
+    Base transforms for object detection:
+    - Convert to tensor and normalize
+    - Convert boxes to normalized [0, 1] coordinates
     """
     def __init__(self, min_size=800, max_size=1333):
         self.min_size = min_size
@@ -119,51 +118,79 @@ class DetectionTransforms:
         )
 
     def __call__(self, img, target):
-        # 1. Convert PIL image to tensor and normalize
-        img = F.to_tensor(img)
-        img = self.normalize(img)
-        
-        # 2. Convert boxes to normalized [0, 1] coordinates
-        h, w = img.shape[-2:]
+        # 1. Get original size
+        w, h = img.size
+
+        # 2. Convert boxes to normalized coordinates FIRST
         if target is not None and len(target["boxes"]):
             boxes = target["boxes"]
             boxes = boxes / torch.tensor([w, h, w, h], dtype=torch.float32)
             target["boxes"] = boxes
+
+        # 3. Convert PIL image to tensor and normalize
+        img = F.to_tensor(img)
+        img = self.normalize(img)
             
         return img, target
 
 class TrainTransforms(DetectionTransforms):
     """
     Training transforms with augmentation.
+    All box operations are done in normalized coordinates.
     """
     def __call__(self, img, target):
-        # 1. Random horizontal flip
+        # 1. Get original size
+        w, h = img.size
+
+        # 2. Convert boxes to normalized coordinates FIRST
+        if target is not None and len(target["boxes"]):
+            boxes = target["boxes"]
+            boxes = boxes / torch.tensor([w, h, w, h], dtype=torch.float32)
+            target["boxes"] = boxes
+
+        # 3. Random horizontal flip
         if torch.rand(1) > 0.5:
             img = F.hflip(img)
             if target is not None and len(target["boxes"]):
                 boxes = target["boxes"]
-                boxes[:, [0, 2]] = 1 - boxes[:, [2, 0]]  # flip x coordinates
+                boxes[:, [0, 2]] = 1 - boxes[:, [2, 0]]  # correct for normalized coords
                 target["boxes"] = boxes
         
-        # 2. Random resize
-        h = torch.randint(self.min_size, self.max_size + 1, (1,)).item()
-        w = h  # square resize for simplicity
-        img = F.resize(img, [h, w])
+        # 4. Resize to a fixed size for batching
+        # Instead of random size, we'll use min_size for both dimensions
+        # Will come back to this later
+        img = F.resize(img, [self.min_size, self.min_size])
         
-        # 3. Convert to tensor and normalize
-        return super().__call__(img, target)
+        # 5. Convert to tensor and normalize
+        img = F.to_tensor(img)
+        img = self.normalize(img)
+        
+        return img, target
 
 class ValTransforms(DetectionTransforms):
     """
     Validation transforms (no augmentation).
+    All box operations are done in normalized coordinates.
     """
     def __call__(self, img, target):
-        # Just resize to min_size
+        # 1. Get original size
+        w, h = img.size
+
+        # 2. Convert boxes to normalized coordinates FIRST
+        if target is not None and len(target["boxes"]):
+            boxes = target["boxes"]
+            boxes = boxes / torch.tensor([w, h, w, h], dtype=torch.float32)
+            target["boxes"] = boxes
+
+        # 3. Resize to min_size
         h = self.min_size
         w = h
         img = F.resize(img, [h, w])
         
-        # Convert to tensor and normalize
-        return super().__call__(img, target)
+        # 4. Convert to tensor and normalize
+        img = F.to_tensor(img)
+        img = self.normalize(img)
+        
+        return img, target
 
 
