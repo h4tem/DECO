@@ -28,7 +28,7 @@ from utils.data_utils import (
     collate_fn
 )
 
-def build_model(num_classes=91):  # COCO has 80 classes + background
+def build_model(num_classes=81):  # 80 COCO classes + background
     # 1. Backbone
     backbone = ResNet18Backbone(pretrained=True)
     
@@ -56,6 +56,7 @@ def build_model(num_classes=91):  # COCO has 80 classes + background
 def train_one_epoch(model, criterion, data_loader, optimizer, device):
     model.train()
     total_loss = 0
+    num_batches = len(data_loader)
     
     for batch_idx, (images, targets) in enumerate(data_loader):
         # Move to device
@@ -81,13 +82,14 @@ def train_one_epoch(model, criterion, data_loader, optimizer, device):
         
         total_loss += losses.item()
         
-        if batch_idx % 10 == 0:
-            print(f'Batch [{batch_idx}], Loss: {losses.item():.4f}')
+        # Print progress every 100 batches
+        if batch_idx % 100 == 0:
+            print(f'Batch [{batch_idx}/{num_batches}], Loss: {losses.item():.4f}')
             print(f'  - Class loss: {loss_dict["loss_ce"].item():.4f}')
             print(f'  - Box loss: {loss_dict["loss_bbox"].item():.4f}')
             print(f'  - GIoU loss: {loss_dict["loss_giou"].item():.4f}')
             
-    return total_loss / len(data_loader)
+    return total_loss / num_batches
 
 def main():
     # 1. Setup paths for COCO dataset
@@ -105,32 +107,26 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
-    # 3. Create dataset
-    full_dataset = CocoDetection(
+    # 3. Create dataset with full COCO
+    train_dataset = CocoDetection(
         img_folder=str(img_folder),
         ann_file=str(ann_file),
-        transforms=TrainTransforms(min_size=320, max_size=320)  # Slightly larger for real data
+        transforms=TrainTransforms(min_size=800, max_size=1333)  # Standard COCO sizes
     )
-    
-    # Create a subset of 1000 images
-    num_train = 1000
-    indices = list(range(len(full_dataset)))
-    random.seed(42)  # For reproducibility
-    subset_indices = random.sample(indices, num_train)
-    train_dataset = Subset(full_dataset, subset_indices)
-    print(f"\nUsing {num_train} images from COCO train2017")
+    print(f"\nUsing full COCO dataset with {len(train_dataset)} images")
     
     # 4. Create dataloader
     train_loader = DataLoader(
         train_dataset, 
-        batch_size=8,  # Increased for better training
+        batch_size=2,  # Reduced batch size for full dataset
         shuffle=True,
         num_workers=4,
-        collate_fn=collate_fn
+        collate_fn=collate_fn,
+        pin_memory=True  # Better GPU memory usage
     )
     
     # 5. Build model (with COCO classes)
-    model = build_model(num_classes=91)  # COCO has 80 classes + background
+    model = build_model(num_classes=81)  # 80 COCO classes + background
     model = model.to(device)
     
     # 6. Setup criterion
@@ -148,7 +144,7 @@ def main():
     )
     criterion = criterion.to(device)
     
-    # 7. Setup optimizer
+    # 7. Setup optimizer with learning rate schedule
     param_dicts = [
         {
             "params": [p for n, p in model.named_parameters() 
@@ -162,8 +158,11 @@ def main():
     ]
     optimizer = optim.AdamW(param_dicts, lr=1e-4, weight_decay=1e-4)
     
+    # Learning rate scheduler
+    lr_scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.1)
+    
     # 8. Training loop
-    num_epochs = 50  # Reduced epochs since we have more data
+    num_epochs = 100  
     print("\nStarting training...")
     
     os.makedirs('outputs', exist_ok=True)
@@ -171,6 +170,7 @@ def main():
     
     for epoch in range(num_epochs):
         print(f'\nEpoch {epoch+1}/{num_epochs}')
+        print(f'Learning rates: {[group["lr"] for group in optimizer.param_groups]}')
         
         train_loss = train_one_epoch(
             model=model,
@@ -180,6 +180,9 @@ def main():
             device=device
         )
         
+        # Step the learning rate scheduler
+        lr_scheduler.step()
+        
         print(f'Epoch {epoch+1}, Avg Loss: {train_loss:.4f}')
         
         # Save checkpoint
@@ -187,6 +190,7 @@ def main():
             'epoch': epoch,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': lr_scheduler.state_dict(),
             'loss': train_loss,
         }
         
